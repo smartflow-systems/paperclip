@@ -124,6 +124,7 @@ export type AuthorizationDecision = {
     | "deny_unauthenticated"
     | "deny_company_boundary"
     | "deny_missing_membership"
+    | "deny_explicit_task_assign"
     | "deny_missing_grant"
     | "deny_missing_consent"
     | "deny_no_grant"
@@ -176,6 +177,18 @@ function canCreateAgentsLegacy(agent: { role: string; permissions: unknown }) {
   // defaults the agent service applies on read so enforcement matches what
   // the API reports.
   return normalizeAgentPermissions(agent.permissions).canCreateAgents;
+}
+
+/**
+ * A stored literal `canAssignTasks: false` is an explicit actor-side deny for
+ * tasks:assign. CEO and agent-creator authority still take precedence; an
+ * omitted flag keeps the existing grant/simple-default behaviour.
+ */
+export function hasExplicitTaskAssignDeny(agent: { role: string; permissions: unknown }) {
+  if (canCreateAgentsLegacy(agent)) return false;
+  const permissions = agent.permissions;
+  if (typeof permissions !== "object" || permissions === null || Array.isArray(permissions)) return false;
+  return (permissions as Record<string, unknown>).canAssignTasks === false;
 }
 
 function scopeValueList(value: unknown): string[] {
@@ -1869,6 +1882,16 @@ export function authorizationService(db: Db | DbTransaction) {
         action: input.action,
         reason: "deny_company_boundary",
         explanation: "Actor agent was not found in the target company.",
+      });
+    }
+
+    // Explicit canAssignTasks:false overrides simple-default membership, stale
+    // tasks:assign grants, task-bridge scopes and low-trust boundary allows.
+    if (input.action === "tasks:assign" && hasExplicitTaskAssignDeny(actorAgent)) {
+      return deny({
+        action: input.action,
+        reason: "deny_explicit_task_assign",
+        explanation: "Actor agent has task assignment explicitly disabled (canAssignTasks: false).",
       });
     }
 

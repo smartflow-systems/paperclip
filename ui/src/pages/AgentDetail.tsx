@@ -2052,11 +2052,13 @@ export function ConfigurationTab({
       ? "Enabled automatically for CEO agents."
       : taskAssignSource === "agent_creator"
         ? "Enabled automatically while this agent can create new agents."
-        : taskAssignSource === "explicit_grant"
-          ? "Enabled via explicit organization permission grant."
-          : taskAssignSource === "simple_default"
-            ? "Enabled by simple organization-wide task assignment defaults."
-            : "Disabled unless explicitly granted.";
+        : taskAssignSource === "explicit_deny"
+          ? "Task assignment is explicitly disabled for this agent."
+          : taskAssignSource === "explicit_grant"
+            ? "Enabled via explicit organization permission grant."
+            : taskAssignSource === "simple_default"
+              ? "Enabled by simple organization-wide task assignment defaults."
+              : "Disabled unless explicitly granted.";
 
   return (
     <div className="agent-settings-form space-y-6">

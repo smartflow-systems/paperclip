@@ -556,6 +556,118 @@ describeEmbeddedPostgres("authorization service", () => {
     expect(decision.explanation).toContain("shared default-open");
   });
 
+  describe("explicit canAssignTasks:false", () => {
+    async function decideAssignment(permissions: Record<string, unknown>, role = "engineer") {
+      const company = await createCompany(db, `ExplicitAssignDeny-${randomUUID()}`);
+      const actorAgent = await createAgent(db, company.id, { role, permissions });
+      const targetAgent = await createAgent(db, company.id);
+      await db.insert(companyMemberships).values({
+        companyId: company.id,
+        principalType: "agent",
+        principalId: actorAgent.id,
+        status: "active",
+        membershipRole: "member",
+      });
+      return {
+        company,
+        actorAgent,
+        decide: () => authorizationService(db).decide({
+          actor: { type: "agent", agentId: actorAgent.id, companyId: company.id, source: "agent_key" },
+          action: "tasks:assign",
+          resource: { type: "issue", companyId: company.id, assigneeAgentId: targetAgent.id },
+          scope: { assigneeAgentId: targetAgent.id },
+        }),
+      };
+    }
+
+    it("denies a standard-trust agent with active membership", async () => {
+      const { decide } = await decideAssignment({ canAssignTasks: false });
+
+      await expect(decide()).resolves.toMatchObject({
+        allowed: false,
+        reason: "deny_explicit_task_assign",
+      });
+    });
+
+    it("overrides a leftover tasks:assign grant", async () => {
+      const { company, actorAgent, decide } = await decideAssignment({ canAssignTasks: false });
+      await db.insert(principalPermissionGrants).values({
+        companyId: company.id,
+        principalType: "agent",
+        principalId: actorAgent.id,
+        permissionKey: "tasks:assign",
+        grantedByUserId: null,
+      });
+
+      await expect(decide()).resolves.toMatchObject({
+        allowed: false,
+        reason: "deny_explicit_task_assign",
+      });
+    });
+
+    it("keeps simple-default assignment when canAssignTasks is omitted or true", async () => {
+      for (const permissions of [{}, { canAssignTasks: true }]) {
+        const { decide } = await decideAssignment(permissions);
+        await expect(decide()).resolves.toMatchObject({
+          allowed: true,
+          reason: "allow_visible_issue_write",
+        });
+      }
+    });
+
+    it("does not remove CEO task assignment authority", async () => {
+      const { decide } = await decideAssignment({ canAssignTasks: false }, "ceo");
+
+      await expect(decide()).resolves.toMatchObject({ allowed: true });
+    });
+
+    it("does not remove agent-creator task assignment authority", async () => {
+      const { decide } = await decideAssignment({ canAssignTasks: false, canCreateAgents: true });
+
+      await expect(decide()).resolves.toMatchObject({ allowed: true });
+    });
+
+    it("denies a low-trust agent even for an otherwise in-boundary assignment", async () => {
+      const company = await createCompany(db, "LowTrustExplicitAssignDeny");
+      const project = await createProject(db, company.id, "Allowed");
+      const collaborator = await createAgent(db, company.id);
+      const boundaryPermissions = {
+        trustPreset: LOW_TRUST_REVIEW_PRESET,
+        authorizationPolicy: {
+          trustBoundary: {
+            mode: LOW_TRUST_REVIEW_PRESET,
+            projectIds: [project.id],
+            allowedAgentIds: [collaborator.id],
+          },
+        },
+      };
+      const allowedAgent = await createAgent(db, company.id, { permissions: boundaryPermissions });
+      const deniedAgent = await createAgent(db, company.id, {
+        permissions: { ...boundaryPermissions, canAssignTasks: false },
+      });
+      const request = (agentId: string) => authorizationService(db).decide({
+        actor: { type: "agent", agentId, companyId: company.id, source: "agent_key" },
+        action: "tasks:assign",
+        resource: {
+          type: "issue",
+          companyId: company.id,
+          projectId: project.id,
+          assigneeAgentId: collaborator.id,
+        },
+        scope: { projectId: project.id, assigneeAgentId: collaborator.id },
+      });
+
+      await expect(request(allowedAgent.id)).resolves.toMatchObject({
+        allowed: true,
+        reason: "allow_simple_company_member",
+      });
+      await expect(request(deniedAgent.id)).resolves.toMatchObject({
+        allowed: false,
+        reason: "deny_explicit_task_assign",
+      });
+    });
+  });
+
   it("allows standard-trust agents to comment on and update visible peer-owned issues", async () => {
     const company = await createCompany(db, "DefaultOpenPeerWrites");
     const actorAgent = await createAgent(db, company.id);

@@ -1603,6 +1603,17 @@ export function agentRoutes(
       };
     }
 
+    // Stored literal canAssignTasks:false is enforced as an explicit deny, so
+    // it outranks leftover grants and the simple-default membership rule.
+    if (agent.permissions?.canAssignTasks === false) {
+      return {
+        canAssignTasks: false,
+        taskAssignSource: "explicit_deny" as const,
+        membership,
+        grants,
+      };
+    }
+
     if (hasExplicitTaskAssignGrant) {
       return {
         canAssignTasks: true,
