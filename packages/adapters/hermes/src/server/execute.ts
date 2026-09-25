@@ -14,7 +14,8 @@
  *   -w/--worktree      isolated git worktree
  *   -v/--verbose       verbose output
  *   --checkpoints      filesystem checkpoints
- *   --yolo             bypass dangerous-command approval prompts (agents have no TTY)
+ *   --yolo             bypass dangerous-command approval prompts (only when
+ *                      adapterConfig.dangerouslyBypassApprovals === true)
  *   --source           session source tag for filtering
  */
 
@@ -73,6 +74,15 @@ function cfgStringArray(v: unknown): string[] | undefined {
   return Array.isArray(v) && v.every((i) => typeof i === "string")
     ? (v as string[])
     : undefined;
+}
+
+/**
+ * Hermes parses flags with argparse prefix abbreviation, so --y, --yo and --yol
+ * all resolve to --yolo. Match the flag portion before any "=".
+ */
+export function isHermesYoloArg(arg: string): boolean {
+  const flag = arg.split("=", 1)[0];
+  return flag.length >= 3 && "--yolo".startsWith(flag);
 }
 
 export function resolveHermesCommand(config: Record<string, unknown>): string {
@@ -347,7 +357,14 @@ export async function execute(
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
   const toolsets = cfgString(config.toolsets) || cfgStringArray(config.enabledToolsets)?.join(",");
-  const extraArgs = cfgStringArray(config.extraArgs);
+  // Approval bypass is opt-in: only a literal boolean true enables --yolo.
+  // --yolo (and every argparse abbreviation of it) supplied through extraArgs
+  // is always stripped so the flag is the single switch and --yolo is passed
+  // at most once.
+  const bypassApprovals = cfgBoolean(config.dangerouslyBypassApprovals) === true;
+  const configuredExtraArgs = cfgStringArray(config.extraArgs);
+  const extraArgs = configuredExtraArgs?.filter((arg) => !isHermesYoloArg(arg));
+  const strippedExtraArgsYolo = (configuredExtraArgs?.length ?? 0) !== (extraArgs?.length ?? 0);
   const persistSession = cfgBoolean(config.persistSession) !== false;
   const worktreeMode = cfgBoolean(config.worktreeMode) === true;
   const checkpoints = cfgBoolean(config.checkpoints) === true;
@@ -470,12 +487,17 @@ export async function execute(
   // Requires hermes-agent >= PR #3255 (feat/session-source-tag).
   args.push("--source", "tool");
 
-  // Bypass Hermes dangerous-command approval prompts.
-  // Paperclip agents run as non-interactive subprocesses with no TTY,
-  // so approval prompts would always timeout and deny legitimate commands
-  // (curl, python3 -c, etc.). Agents operate in a sandbox — the approval
-  // system is designed for human-attended interactive sessions.
-  args.push("--yolo");
+  // Bypass Hermes dangerous-command approval prompts only when the board has
+  // explicitly opted in. Hermes runs without a TTY or stdin, so with bypass
+  // off, commands Hermes classifies as dangerous are denied rather than run.
+  if (bypassApprovals) {
+    args.push("--yolo");
+  } else if (strippedExtraArgsYolo) {
+    await ctx.onLog(
+      "stdout",
+      "[hermes] Warning: ignored --yolo from extraArgs; set adapterConfig.dangerouslyBypassApprovals to true to bypass approvals.\n",
+    );
+  }
 
   if (persistSession && prevSessionId) {
     args.push("--resume", prevSessionId);
@@ -501,6 +523,9 @@ export async function execute(
   delete env.PAPERCLIP_API_KEY;
   // Wake context travels in the prompt; drop both inherited and configured copies.
   delete env.PAPERCLIP_WAKE_PAYLOAD_JSON;
+  // HERMES_YOLO_MODE is equivalent to --yolo; neither adapter config nor the
+  // inherited server environment may enable it unless bypass is opted in.
+  if (!bypassApprovals) delete env.HERMES_YOLO_MODE;
   if ((ctx as any).authToken) env.PAPERCLIP_API_KEY = (ctx as any).authToken;
 
   // BUG FIX: Read task context from ctx.context (wake context), not ctx.config (adapter config)
