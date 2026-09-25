@@ -94,6 +94,7 @@ tools, persistent memory, session persistence, skills, and MCP support.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | toolsets | string | (all) | Comma-separated toolsets to enable (e.g. "terminal,file,web") |
+| dangerouslyBypassApprovals | boolean | false | Pass --yolo to skip Hermes dangerous-command approvals. Only literal true enables it. When off, --yolo and its abbreviations (--y, --yo, --yol) are stripped from extraArgs and HERMES_YOLO_MODE is removed from the child environment. Board-controlled: agents cannot change it, Hermes env location keys, or (for hermes_local) extraArgs/command/hermesCommand. Host Hermes config (~/.hermes/config.yaml, e.g. approvals.mode) remains trusted operator policy and is not overridden. |
 
 ## Session & Workspace
 

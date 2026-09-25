@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { listOpenRouterModels } from "../services/openrouter-models.js";
 import { prepareManagedAiRuntime, assertManagedAiProjectAuth, stripAiAuthBindings } from "../services/ai-connection-runtime.js";
@@ -2878,12 +2879,110 @@ export function agentRoutes(
     return KNOWN_INSTRUCTIONS_BUNDLE_KEYS.some((key) => adapterConfig[key] !== undefined);
   }
 
+  // Hermes approval bypass is board-controlled. Agents may not set the flag,
+  // plant env vars that enable bypass or relocate Hermes config, or (on
+  // hermes_local) change the argv/executable, which could re-add --yolo.
+  const HERMES_APPROVAL_ENV_KEYS = [
+    "HERMES_YOLO_MODE",
+    "HERMES_HOME",
+    "HERMES_PROFILE",
+    "HERMES_CONFIG",
+    "HERMES_ENV",
+  ] as const;
+  const HERMES_LOCAL_EXECUTION_KEYS = ["extraArgs", "command", "hermesCommand"] as const;
+
+  function hermesApprovalBypassChanges(
+    adapterConfig: Record<string, unknown>,
+    baseline: Record<string, unknown>,
+    adapterType: string | null | undefined,
+    path: string,
+  ): string[] {
+    const changed: string[] = [];
+    if (
+      adapterConfig.dangerouslyBypassApprovals !== undefined &&
+      adapterConfig.dangerouslyBypassApprovals !== baseline.dangerouslyBypassApprovals
+    ) {
+      changed.push(`${path}.dangerouslyBypassApprovals`);
+    }
+    const env = asRecord(adapterConfig.env);
+    const baselineEnv = asRecord(baseline.env) ?? {};
+    for (const key of HERMES_APPROVAL_ENV_KEYS) {
+      if (env?.[key] !== undefined && !isDeepStrictEqual(env[key], baselineEnv[key])) {
+        changed.push(`${path}.env.${key}`);
+      }
+    }
+    if (adapterType === "hermes_local") {
+      for (const key of HERMES_LOCAL_EXECUTION_KEYS) {
+        if (adapterConfig[key] !== undefined && !isDeepStrictEqual(adapterConfig[key], baseline[key])) {
+          changed.push(`${path}.${key}`);
+        }
+      }
+    }
+    return changed;
+  }
+
+  function assertNoAgentApprovalBypassMutation(
+    req: Request,
+    adapterConfig: Record<string, unknown>,
+    options: { adapterType: string | null | undefined; baseline?: Record<string, unknown> },
+    path = "adapterConfig",
+  ) {
+    if (req.actor.type !== "agent") return;
+    const changedKeys = hermesApprovalBypassChanges(
+      adapterConfig,
+      options.baseline ?? {},
+      options.adapterType,
+      path,
+    );
+    if (changedKeys.length === 0) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot modify approval bypass configuration (${changedKeys.join(", ")})`,
+    );
+  }
+
+  // Rollback restores a whole stored config, so compare protected fields in
+  // both directions instead of reusing the patch guard (which would also reject
+  // the instructions keys every revision carries).
+  function assertNoAgentApprovalBypassRollback(
+    req: Request,
+    input: {
+      currentAdapterType: string;
+      currentAdapterConfig: Record<string, unknown>;
+      rollbackAdapterType: string;
+      rollbackAdapterConfig: Record<string, unknown>;
+    },
+  ) {
+    if (req.actor.type !== "agent") return;
+    const current = input.currentAdapterConfig;
+    const target = input.rollbackAdapterConfig;
+    const currentEnv = asRecord(current.env) ?? {};
+    const targetEnv = asRecord(target.env) ?? {};
+    const changedKeys: string[] = [];
+    if (!isDeepStrictEqual(target.dangerouslyBypassApprovals, current.dangerouslyBypassApprovals)) {
+      changedKeys.push("adapterConfig.dangerouslyBypassApprovals");
+    }
+    for (const key of HERMES_APPROVAL_ENV_KEYS) {
+      if (!isDeepStrictEqual(targetEnv[key], currentEnv[key])) changedKeys.push(`adapterConfig.env.${key}`);
+    }
+    if (input.currentAdapterType === "hermes_local" || input.rollbackAdapterType === "hermes_local") {
+      for (const key of HERMES_LOCAL_EXECUTION_KEYS) {
+        if (!isDeepStrictEqual(target[key], current[key])) changedKeys.push(`adapterConfig.${key}`);
+      }
+    }
+    if (changedKeys.length === 0) return;
+    throw forbidden(
+      `Agent-authenticated callers cannot modify approval bypass configuration (${changedKeys.join(", ")})`,
+    );
+  }
+
   function assertNoAgentAdapterConfigMutation(
     req: Request,
     adapterConfig: Record<string, unknown>,
+    options: { adapterType: string | null | undefined; baseline?: Record<string, unknown> },
     path = "adapterConfig",
   ) {
     assertNoAgentInstructionsConfigMutation(req, adapterConfig, path);
+    assertNoAgentApprovalBypassMutation(req, adapterConfig, options, path);
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectAgentAdapterWorkspaceCommandPaths(adapterConfig, path),
@@ -4329,6 +4428,12 @@ export function agentRoutes(
       await assertSelectableAdapterType(rollbackAdapterType);
     }
     const rollbackAdapterConfig = asRecord(rollbackConfig.adapterConfig) ?? {};
+    assertNoAgentApprovalBypassRollback(req, {
+      currentAdapterType: existing.adapterType,
+      currentAdapterConfig: asRecord(existing.adapterConfig) ?? {},
+      rollbackAdapterType,
+      rollbackAdapterConfig,
+    });
     assertExternalInstructionsAdmin(req, existing);
     assertExternalInstructionsAdmin(req, {
       ...existing,
@@ -4490,7 +4595,7 @@ export function agentRoutes(
       hireInput.adapterType,
       rawHireAdapterConfig,
     );
-    assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig);
+    assertNoAgentAdapterConfigMutation(req, rawHireAdapterConfig, { adapterType: hireInput.adapterType });
     const hiredAgentId = randomUUID();
     const authInheritance = await applyHiringAgentAuthInheritance(
       req,
@@ -4798,7 +4903,7 @@ export function agentRoutes(
       createInput.adapterType,
       rawCreateAdapterConfig,
     );
-    assertNoAgentAdapterConfigMutation(req, rawCreateAdapterConfig);
+    assertNoAgentAdapterConfigMutation(req, rawCreateAdapterConfig, { adapterType: createInput.adapterType });
     const agentId = randomUUID();
     const requestedAdapterConfig = applyCodexLocalKeyIsolation(
       companyId,
@@ -5241,7 +5346,14 @@ export function agentRoutes(
         res.status(422).json({ error: "adapterConfig must be an object" });
         return;
       }
-      assertNoAgentAdapterConfigMutation(req, adapterConfig);
+      const effectiveAdapterType =
+        typeof patchData.adapterType === "string" ? patchData.adapterType : existing.adapterType;
+      assertNoAgentAdapterConfigMutation(req, adapterConfig, {
+        adapterType: effectiveAdapterType,
+        // Changing adapter type starts from a fresh config, so every supplied
+        // protected value counts as a change.
+        baseline: effectiveAdapterType === existing.adapterType ? (asRecord(existing.adapterConfig) ?? {}) : {},
+      });
       const changingInstructionsConfig = adapterConfigTouchesInstructionsConfig(adapterConfig);
       if (changingInstructionsConfig) {
         await assertCanManageInstructionsPath(req, existing);

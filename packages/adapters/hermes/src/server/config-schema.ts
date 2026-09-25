@@ -57,6 +57,13 @@ export function getConfigSchema(): AdapterConfigSchema {
         hint: "Optional comma-separated Hermes toolsets, such as terminal,file,web.",
       },
       {
+        key: "dangerouslyBypassApprovals",
+        label: "Bypass approvals (dangerous)",
+        type: "toggle",
+        default: false,
+        hint: "Pass Hermes --yolo so dangerous commands run without approval. Off by default; when off, --yolo in extraArgs and HERMES_YOLO_MODE are ignored. Host ~/.hermes/config.yaml approval settings still apply. Board-controlled.",
+      },
+      {
         key: "persistSession",
         label: "Persist session",
         type: "toggle",

@@ -941,6 +941,162 @@ describe.sequential("agent permission routes", () => {
     expect(mockLogActivity).not.toHaveBeenCalled();
   }, 15_000);
 
+  it("blocks agent-authenticated self-updates that enable Hermes approval bypass", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ adapterConfig: { dangerouslyBypassApprovals: true } }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("approval bypass configuration");
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Hermes extraArgs", { extraArgs: ["--yo"] }, "adapterConfig.extraArgs"],
+    ["HERMES_YOLO_MODE", { env: { HERMES_YOLO_MODE: { type: "plain", value: "1" } } }, "adapterConfig.env.HERMES_YOLO_MODE"],
+    ["HERMES_HOME", { env: { HERMES_HOME: { type: "plain", value: "/tmp/permissive" } } }, "adapterConfig.env.HERMES_HOME"],
+    ["hermesCommand", { hermesCommand: "/tmp/hermes-yolo-wrapper" }, "adapterConfig.hermesCommand"],
+  ])("blocks agent-authenticated Hermes self-updates that change %s", async (_label, adapterConfig, field) => {
+    mockAgentService.getById.mockResolvedValue({ ...baseAgent, adapterType: "hermes_local" });
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ adapterConfig }));
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("approval bypass configuration");
+    expect(res.body.error).toContain(field);
+    expect(mockAgentService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not apply Hermes execution-key restrictions to other adapters", async () => {
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ adapterConfig: { extraArgs: ["--verbose"] } }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+  });
+
+  it("blocks agent-authenticated rollback to a revision that enables approval bypass", async () => {
+    const revisionId = "33333333-3333-4333-8333-333333333333";
+    mockAgentService.getById.mockResolvedValue({ ...baseAgent, adapterType: "hermes_local" });
+    mockAgentService.getConfigRevision.mockResolvedValue({
+      id: revisionId,
+      afterConfig: {
+        adapterType: "hermes_local",
+        adapterConfig: { dangerouslyBypassApprovals: true },
+        runtimeConfig: {},
+      },
+    });
+    const app = await createApp({
+      type: "agent",
+      agentId,
+      companyId,
+      source: "agent_key",
+      runId: "run-1",
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+    );
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("adapterConfig.dangerouslyBypassApprovals");
+    expect(mockAgentService.rollbackConfigRevision).not.toHaveBeenCalled();
+  });
+
+  it("allows board updates to Hermes approval-bypass configuration", async () => {
+    mockAgentService.getById.mockResolvedValue({ ...baseAgent, adapterType: "hermes_local" });
+    mockAgentService.update.mockResolvedValue({ ...baseAgent, adapterType: "hermes_local" });
+    const app = await createApp({
+      type: "board",
+      userId: "instance-admin-user",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+    const adapterConfig = {
+      dangerouslyBypassApprovals: true,
+      extraArgs: ["--yolo"],
+      hermesCommand: "/usr/local/bin/hermes",
+      env: { HERMES_HOME: { type: "plain", value: "/srv/hermes" } },
+    };
+
+    const res = await requestApp(app, (baseUrl) => request(baseUrl)
+      .patch(`/api/agents/${agentId}`)
+      .send({ adapterConfig }));
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.update).toHaveBeenCalledWith(
+      agentId,
+      expect.objectContaining({
+        adapterConfig: expect.objectContaining({
+          dangerouslyBypassApprovals: true,
+          extraArgs: ["--yolo"],
+          hermesCommand: "/usr/local/bin/hermes",
+        }),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("allows board rollback to a revision that enables approval bypass", async () => {
+    const revisionId = "33333333-3333-4333-8333-333333333333";
+    mockAgentService.getById.mockResolvedValue({ ...baseAgent, adapterType: "hermes_local" });
+    mockAgentService.getConfigRevision.mockResolvedValue({
+      id: revisionId,
+      afterConfig: {
+        adapterType: "hermes_local",
+        adapterConfig: { dangerouslyBypassApprovals: true },
+        runtimeConfig: {},
+      },
+    });
+    mockAgentService.rollbackConfigRevision.mockResolvedValue({
+      ...baseAgent,
+      adapterType: "hermes_local",
+      adapterConfig: { dangerouslyBypassApprovals: true },
+    });
+    const app = await createApp({
+      type: "board",
+      userId: "instance-admin-user",
+      source: "session",
+      isInstanceAdmin: true,
+      companyIds: [companyId],
+    });
+
+    const res = await requestApp(app, (baseUrl) =>
+      request(baseUrl).post(`/api/agents/${agentId}/config-revisions/${revisionId}/rollback`),
+    );
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAgentService.rollbackConfigRevision).toHaveBeenCalled();
+  });
+
   it("blocks agent-authenticated instructions-path updates", async () => {
     const app = await createApp({
       type: "agent",
