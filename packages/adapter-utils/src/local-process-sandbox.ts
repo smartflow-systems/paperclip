@@ -66,6 +66,8 @@ const SYSTEM_READ_PATHS = [
   "/etc/gitconfig",
 ] as const;
 
+const MERGED_USR_PATHS = new Set<string>(["/bin", "/sbin", "/lib", "/lib64"]);
+
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"] as const;
 const SANDBOX_PROXY_PORT = 31_337;
 const UNIX_SOCKET_PATH_MAX_BYTES = 107;
@@ -386,12 +388,6 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
 
   if (filesystemScope === "workspace") {
     args.push("--tmpfs", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
-    args.push(
-      "--symlink", "usr/bin", "/bin",
-      "--symlink", "usr/sbin", "/sbin",
-      "--symlink", "usr/lib", "/lib",
-      "--symlink", "usr/lib64", "/lib64",
-    );
     const created = new Set<string>(["/", "/proc", "/dev", "/tmp"]);
     const mounted = new Set<string>();
     const mount = async (source: string, access: LocalProcessSandboxAccess) => {
@@ -402,7 +398,18 @@ export async function buildLocalProcessSandboxSpawnTarget(input: {
       mounted.add(normalized);
       created.add(normalized);
     };
-    for (const systemPath of SYSTEM_READ_PATHS) await mount(systemPath, "ro");
+    for (const systemPath of SYSTEM_READ_PATHS) {
+      // Merged-/usr hosts link /bin, /lib, etc. into /usr. Recreate those links instead of
+      // bind-mounting through them, which fails before /usr itself is mounted.
+      const linkTarget = MERGED_USR_PATHS.has(systemPath) ? await fs.readlink(systemPath).catch(() => null) : null;
+      if (linkTarget) {
+        args.push("--symlink", linkTarget, systemPath);
+        created.add(systemPath);
+        mounted.add(systemPath);
+        continue;
+      }
+      await mount(systemPath, "ro");
+    }
     for (const executablePath of await executableReadPaths(input.executable)) await mount(executablePath, "ro");
     if (networkScope === "allowlist") {
       for (const nodePath of await executableReadPaths(process.execPath)) await mount(nodePath, "ro");

@@ -103,6 +103,35 @@ describe("local process sandbox", () => {
     expect(target.args.slice(-3)).toEqual([process.execPath, "-e", "console.log('ok')"]);
   });
 
+  it.runIf(process.platform === "linux")("mirrors merged-/usr symlinks instead of binding through them", async () => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-fs-merged-usr-"));
+    cleanup.push(workspace);
+
+    const target = await buildLocalProcessSandboxSpawnTarget({
+      executable: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: workspace,
+      options: { workspaceDir: workspace, filesystemScope: "workspace" },
+    });
+
+    const destinations = (flag: string) =>
+      target.args.flatMap((arg, index) => (arg === flag ? [target.args[index + 2]] : []));
+    for (const systemPath of ["/bin", "/sbin", "/lib", "/lib64"]) {
+      const stat = await fs.lstat(systemPath).catch(() => null);
+      if (!stat) {
+        expect(destinations("--symlink")).not.toContain(systemPath);
+        expect(destinations("--ro-bind")).not.toContain(systemPath);
+      } else if (stat.isSymbolicLink()) {
+        const symlinkIndex = target.args.findIndex((arg, index) => arg === "--symlink" && target.args[index + 2] === systemPath);
+        expect(target.args[symlinkIndex + 1]).toBe(await fs.readlink(systemPath));
+        expect(destinations("--ro-bind")).not.toContain(systemPath);
+      } else {
+        expect(destinations("--ro-bind")).toContain(systemPath);
+        expect(destinations("--symlink")).not.toContain(systemPath);
+      }
+    }
+  });
+
   it.runIf(process.platform === "linux")("binds a confined absolute alias to the synchronized workspace", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-fs-alias-"));
     cleanup.push(root);
